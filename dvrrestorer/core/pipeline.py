@@ -1,21 +1,26 @@
 """Chunked, OSD-aware restoration pipeline.
 
-For every chunk of frames the pipeline:
-1. Decodes the chunk plus `chroma_lookahead` extra on each end for
-   temporal context in fix_chroma.
-2. For each frame interpolates the keyframe values at t_sec.
-3. Applies fix_dark → fix_lines → fix_chroma in order, all alpha-masked
-   against the OSD mask so painted overlays stay intact.
-4. Writes to a FrameWriter.
+Decodes the clip in a sliding window large enough to supply
+`chroma_lookahead` neighbors on each side of the current frame. Only
+`(2 * chroma_lookahead + chunk_size)` frames live in RAM at any time, so
+multi-hour clips do not blow up memory.
 
-After every chunk is written, remux_audio pulls the original audio
-stream back onto the cleaned video (optional-safe when the source has
-no audio).
+For each frame:
+1. Pull its real timestamp from the capture (CAP_PROP_POS_MSEC) so VFR
+   clips interpolate keyframes at the correct wall-time position.
+2. Interpolate the three fix strengths at that t_sec.
+3. Apply fix_dark → fix_lines → fix_chroma. All three honor the OSD
+   alpha mask.
+4. Write to a FrameWriter.
+
+After the writer closes, remux_audio stream-copies the original audio
+onto the result (no-op if the source has no audio).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -48,8 +53,7 @@ ProgressCB = Callable[[int, int], None]
 def interpolate(keyframes: list[Keyframe], t_sec: float) -> tuple[float, float, float]:
     """Linear interpolation between keyframes with clamp outside range.
 
-    Duplicate-t_sec entries resolve to the later one; after a stable
-    sort by t_sec a duplicate t_sec just means the second value wins.
+    Duplicate-t_sec entries resolve to the later one.
     """
     if not keyframes:
         return (0.0, 0.0, 0.0)
@@ -57,8 +61,6 @@ def interpolate(keyframes: list[Keyframe], t_sec: float) -> tuple[float, float, 
     sorted_kfs = [k for _, k in kfs]
     first, last = sorted_kfs[0], sorted_kfs[-1]
     if t_sec <= first.t_sec:
-        # If multiple keyframes sit exactly at t_sec, prefer the last one
-        # at that time.
         exact = [k for k in sorted_kfs if k.t_sec == t_sec]
         if exact:
             return (exact[-1].dark, exact[-1].lines, exact[-1].chroma)
@@ -68,7 +70,6 @@ def interpolate(keyframes: list[Keyframe], t_sec: float) -> tuple[float, float, 
         if exact:
             return (exact[-1].dark, exact[-1].lines, exact[-1].chroma)
         return (last.dark, last.lines, last.chroma)
-    # Find bracketing pair
     for i in range(len(sorted_kfs) - 1):
         a, b = sorted_kfs[i], sorted_kfs[i + 1]
         if a.t_sec <= t_sec <= b.t_sec:
@@ -90,51 +91,93 @@ def run(
     osd_mask: np.ndarray | None = None,
     progress_cb: ProgressCB | None = None,
 ) -> None:
-    """Run the restoration pipeline end-to-end."""
+    """Run the restoration pipeline end-to-end, chunk-streaming."""
     input_path = Path(input_path)
     output_path = Path(output_path)
     info = video_io.probe(input_path)
 
     if osd_mask is None:
         osd_mask = osd.detect_osd_mask(input_path)
+    if osd_mask is not None and osd_mask.size > 0 and osd_mask.shape != (info.height, info.width):
+        osd_mask = cv2.resize(osd_mask, (info.width, info.height), interpolation=cv2.INTER_LINEAR)
+    if osd_mask is not None and osd_mask.size == 0:
+        osd_mask = None
 
-    # Decode every frame into memory in chunks so we always have the
-    # neighbors we need for temporal denoise.
     lookahead = max(0, int(config.chroma_lookahead))
-
     tmp_out = output_path.with_suffix(".video_only" + output_path.suffix)
-    with video_io.FrameWriter(
-        tmp_out, fps=info.fps, size=(info.width, info.height)
-    ) as writer:
-        all_frames: list[np.ndarray] = []
-        for _, frame in video_io.decode_frames(input_path):
-            all_frames.append(frame)
 
-        total = len(all_frames)
-        for i, frame in enumerate(all_frames):
-            t_sec = i / info.fps
-            dark_s, lines_s, chroma_s = interpolate(config.keyframes, t_sec)
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {input_path}")
 
-            # Resize mask lazily if the clip resolution differs from the
-            # mask (shouldn't happen but keeps us honest).
-            mask = osd_mask
-            if mask is not None and mask.shape != (info.height, info.width):
-                mask = cv2.resize(mask, (info.width, info.height), interpolation=cv2.INTER_LINEAR)
+    try:
+        with video_io.FrameWriter(
+            tmp_out, fps=info.fps, size=(info.width, info.height)
+        ) as writer:
+            maxw = 2 * lookahead + 1
+            window: deque[tuple[np.ndarray, float]] = deque(maxlen=maxw)
+            frames_read = 0
+            frames_written = 0
+            total = info.frame_count if info.frame_count > 0 else 0
 
-            out = fix_dark.fix_dark(frame, mask, strength=dark_s)
-            out = fix_lines.fix_lines(out, mask, strength=lines_s,
-                                     direction_deg=config.direction_deg)
+            def _read_next() -> tuple[np.ndarray, float] | None:
+                nonlocal frames_read
+                pos_msec_before = cap.get(cv2.CAP_PROP_POS_MSEC)
+                ok, frame = cap.read()
+                if not ok:
+                    return None
+                if pos_msec_before > 0.0:
+                    t = pos_msec_before / 1000.0
+                else:
+                    t = frames_read / info.fps if info.fps > 0 else 0.0
+                frames_read += 1
+                return frame, t
 
-            prev = all_frames[max(0, i - lookahead): i]
-            nxt = all_frames[i + 1: i + 1 + lookahead]
-            out = fix_chroma.fix_chroma(
-                out, prev, nxt, mask,
-                strength=chroma_s, temporal_w=config.temporal_w,
-            )
+            # Prime window with up to lookahead+1 frames: the first current
+            # has prev=[] and up to `lookahead` next-frames.
+            for _ in range(lookahead + 1):
+                nxt = _read_next()
+                if nxt is None:
+                    break
+                window.append(nxt)
 
-            writer.write(out)
-            if progress_cb:
-                progress_cb(i + 1, total)
+            # cur_idx is the index of the "current" frame inside the window.
+            # While the window is still growing (early frames), cur_idx moves
+            # with the newly-appended tail; once the window is at maxlen,
+            # appends popleft so cur_idx stays put; after EOF, cur_idx walks
+            # right through the remaining tail.
+            cur_idx = 0
+
+            while cur_idx < len(window):
+                current, t_sec = window[cur_idx]
+                prev = [window[i][0] for i in range(cur_idx)]
+                nxt_frames = [window[i][0] for i in range(cur_idx + 1, len(window))]
+
+                dark_s, lines_s, chroma_s = interpolate(config.keyframes, t_sec)
+                out = fix_dark.fix_dark(current, osd_mask, strength=dark_s)
+                out = fix_lines.fix_lines(out, osd_mask, strength=lines_s,
+                                         direction_deg=config.direction_deg)
+                out = fix_chroma.fix_chroma(
+                    out, prev, nxt_frames, osd_mask,
+                    strength=chroma_s, temporal_w=config.temporal_w,
+                )
+                writer.write(out)
+                frames_written += 1
+                if progress_cb:
+                    progress_cb(frames_written, total)
+
+                nxt_item = _read_next()
+                if nxt_item is not None:
+                    if len(window) < maxw:
+                        window.append(nxt_item)
+                        cur_idx += 1
+                    else:
+                        window.append(nxt_item)  # deque pops left for us
+                        # cur_idx stays — center stays at `lookahead`
+                else:
+                    cur_idx += 1  # drain mode: walk right through tail
+    finally:
+        cap.release()
 
     try:
         video_io.remux_audio(tmp_out, input_path, output_path)

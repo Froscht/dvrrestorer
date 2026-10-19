@@ -22,7 +22,11 @@ def _apply_mask(result: np.ndarray, original: np.ndarray, alpha: np.ndarray | No
 
 def _warp_to(target_gray: np.ndarray, src_bgr: np.ndarray, src_gray: np.ndarray,
              flow_obj) -> np.ndarray:
-    flow = flow_obj.calc(src_gray, target_gray, None)
+    # To express the neighbor (`src`) in the target frame's coordinates
+    # with cv2.remap, we need the flow FROM target TO src — for each
+    # target pixel, where in src to sample. flow_obj.calc(a, b) returns
+    # the flow from a to b, so target→src is calc(target, src).
+    flow = flow_obj.calc(target_gray, src_gray, None)
     h, w = target_gray.shape
     xs, ys = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
     map_x = xs + flow[..., 0]

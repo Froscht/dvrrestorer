@@ -56,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     out_path = Path(args.out) if args.out else in_path.with_name(
         in_path.stem + "_cleaned.mp4"
     )
+    if out_path.resolve() == in_path.resolve():
+        print("error: --out must not point to the input file", file=sys.stderr)
+        return 2
 
     direction_deg = float(args.direction_deg)
 

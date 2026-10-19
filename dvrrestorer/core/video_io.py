@@ -224,9 +224,9 @@ def remux_audio(
         "-i", str(video_only_path),
         "-i", str(audio_source),
         "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:a", "copy",     # stream-copy audio: no generation loss
         "-map", "0:v:0",
-        "-map", "1:a:0?",   # '?' = optional, no-op if absent
+        "-map", "1:a?",     # all audio streams; '?' = optional, no-op if absent
         str(out_path),
     ]
     p = _run(argv)
