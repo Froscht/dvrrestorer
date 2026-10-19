@@ -103,6 +103,29 @@ def darken(frame: np.ndarray, gamma: float) -> np.ndarray:
     return cv2.LUT(frame, lut)
 
 
+def draw_fake_osd(
+    frame: np.ndarray, text: str = "15.5V", pos: tuple[float, float] = (0.75, 0.3)
+) -> np.ndarray:
+    """Paint a static OSD-like text block onto `frame` at a relative position.
+
+    `pos` is (x_frac, y_frac) in [0, 1]. Also draws a few battery icons so
+    the edge-density heuristic has something to lock onto.
+    """
+    out = frame.copy()
+    h, w = out.shape[:2]
+    px = int(pos[0] * w)
+    py = int(pos[1] * h)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = max(0.4, h / 400.0)
+    cv2.putText(out, text, (px, py), font, scale, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(out, text, (px, py), font, scale, (0, 0, 0), 1, cv2.LINE_AA)
+    # Battery icon beside the text
+    bx, by = px - int(0.08 * w), py - int(0.03 * h)
+    cv2.rectangle(out, (bx, by), (bx + 24, by + 12), (255, 255, 255), 1)
+    cv2.rectangle(out, (bx + 24, by + 3), (bx + 27, by + 9), (255, 255, 255), -1)
+    return out
+
+
 def make_artifacted_clip(
     path: Path,
     duration_s: float = 10.0,
