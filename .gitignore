@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Superpowers scratch (brainstorm server state, SDD ledgers)
+.superpowers/
+
+# Test fixtures (generated on demand, not committed)
+tests/fixtures/*.mp4
+
+# Any video/audio samples at the repo root — never committed
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.m4a
+*.wav
+!**/tests/**/*.mp4  # (still blocked by tests/fixtures/*.mp4 above)
+
+# Downloaded tools
+ffmpeg-*/
