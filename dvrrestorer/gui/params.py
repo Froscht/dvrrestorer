@@ -27,6 +27,7 @@ class ParamsPane(ctk.CTkFrame):
             )
             slider.set(0.0)
             slider.pack(fill="x", padx=8)
+            slider._canvas.bind("<ButtonRelease-1>", lambda _e: self._emit(), add="+")
             value = ctk.CTkLabel(self, text="0.00", anchor="e")
             value.pack(fill="x", padx=8)
             self._sliders[key] = slider
@@ -34,7 +35,6 @@ class ParamsPane(ctk.CTkFrame):
 
     def _on_slide(self, key: str) -> None:
         self._labels[key].configure(text=f"{self._sliders[key].get():.2f}")
-        self._emit()
 
     def set_values(self, dark: float, lines: float, chroma: float, direction_deg: float) -> None:
         for key, v in zip(self._sliders, (dark, lines, chroma, direction_deg)):
