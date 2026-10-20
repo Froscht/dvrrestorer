@@ -16,6 +16,8 @@ dependencies = [
     "scipy>=1.11",
     "onnxruntime>=1.17",
     "imageio-ffmpeg>=0.4",
+    "customtkinter>=5.2",
+    "Pillow>=10",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +28,7 @@ coreml = ["onnxruntime-coreml"]
 
 [project.scripts]
 dvrrestorer-cli = "dvrrestorer.cli:main"
+dvrrestorer-gui = "dvrrestorer.gui.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["dvrrestorer"]
