@@ -32,3 +32,6 @@ packages = ["dvrrestorer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gui: tests that require a display / Tk event loop",
+]
