@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -33,6 +34,8 @@ class App(ctk.CTk):
         self._osd_mask: np.ndarray | None = None
         self._scan_done_event = threading.Event()
         self._cursor_t: float = 0.0
+        self._scan_gen: int = 0
+        self._export_in_progress = False
 
         menubar = tk.Menu(self)
         filemenu = tk.Menu(menubar, tearoff=0)
@@ -107,7 +110,15 @@ class App(ctk.CTk):
     # ---- public API ----
     def open_clip(self, path: Path) -> None:
         path = Path(path)
-        info = video_io.probe(path)
+        try:
+            info = video_io.probe(path)
+            if info.fps <= 0:
+                raise ValueError(f"Invalid fps: {info.fps}")
+        except Exception as e:  # noqa: BLE001
+            self._status.configure(text=f"Open failed: {e}")
+            return
+        self._scan_gen += 1
+        gen = self._scan_gen
         self._state = ProjectState(
             input_path=path,
             duration_s=info.frame_count / info.fps,
@@ -124,18 +135,36 @@ class App(ctk.CTk):
         self._init_renderer()
         self._timeline.set_duration(self._state.duration_s)
         self._timeline.set_keyframes([])
+        self._timeline.set_zones([])
         self._status.configure(text="Scanning...")
-        threading.Thread(target=self._scan_worker, args=(path,), daemon=True).start()
+        threading.Thread(target=self._scan_worker, args=(path, gen), daemon=True).start()
 
     def export(self, out_path: Path) -> int:
         if self._state.input_path is None:
-            self._status.configure(text="Open a clip first")
-            try:
-                messagebox.showerror("No clip", "Open a clip first")
-            except Exception:  # noqa: BLE001
-                pass
+            if self.winfo_viewable():
+                try:
+                    messagebox.showerror("No clip", "Open a clip first")
+                except Exception:  # noqa: BLE001
+                    pass
+            self._status.configure(text="No clip loaded - open one first")
             return 1
-        threading.Thread(target=self._export_worker, args=(Path(out_path),), daemon=True).start()
+        if not self._scan_done_event.is_set():
+            self._status.configure(text="Scan still running - wait for it to finish")
+            return 1
+        if self._export_in_progress:
+            self._status.configure(text="Export already running")
+            return 1
+        keyframes_snapshot = copy.deepcopy(self._state.keyframes)
+        direction_snapshot = self._state.direction_deg
+        osd_mask_snapshot = None if self._osd_mask is None else self._osd_mask.copy()
+        input_snapshot = self._state.input_path
+        self._export_in_progress = True
+        threading.Thread(
+            target=self._export_worker,
+            args=(Path(out_path), input_snapshot, keyframes_snapshot,
+                  direction_snapshot, osd_mask_snapshot),
+            daemon=True,
+        ).start()
         return 0
 
     def on_scrub(self, t_sec: float) -> None:
@@ -148,25 +177,32 @@ class App(ctk.CTk):
             self._renderer = None
         self._renderer = PreviewRenderer(self._state.input_path, self._osd_mask)
 
-    def _scan_worker(self, path: Path) -> None:
+    def _scan_worker(self, path: Path, gen: int) -> None:
         try:
             rows = scan(path, sample_every=3)
             zones = detect_zones(rows)
             kfs = auto_keyframes(zones, clip_duration_s=self._state.duration_s)
             osd_mask = detect_osd_mask(path)
-            self.after(0, self._apply_scan_result, zones, kfs, osd_mask)
+            self.after(0, self._apply_scan_result, zones, kfs, osd_mask, gen)
         except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda e=exc: self._status.configure(text=f"Scan failed: {e}"))
-        finally:
-            self._scan_done_event.set()
+            self.after(0, lambda e=exc: self._scan_failed(e, gen))
 
-    def _apply_scan_result(self, zones, kfs, osd_mask) -> None:
+    def _scan_failed(self, exc: Exception, gen: int) -> None:
+        if gen != self._scan_gen:
+            return
+        self._status.configure(text=f"Scan failed: {exc}")
+        self._scan_done_event.set()
+
+    def _apply_scan_result(self, zones, kfs, osd_mask, gen: int) -> None:
+        if gen != self._scan_gen:
+            return  # stale scan from a previously opened clip
         self._osd_mask = osd_mask
         self._state.keyframes = kfs
         self._init_renderer()
         self._timeline.set_zones(zones)
         self._timeline.set_keyframes(kfs)
         self._status.configure(text=f"Scan done: {len(zones)} zones, {len(kfs)} keyframes")
+        self._scan_done_event.set()
         self._rerender()
 
     def _rerender(self) -> None:
@@ -179,7 +215,8 @@ class App(ctk.CTk):
         if self._renderer is None:
             self._init_renderer()
         self._cursor_t = t_sec
-        frame_idx = max(0, int(t_sec * self._state.fps))
+        frame_count = int(self._state.duration_s * self._state.fps)
+        frame_idx = max(0, min(int(t_sec * self._state.fps), max(0, frame_count - 1)))
         before = self._preview.is_showing_before()
         if before:
             bgr = self._renderer.render_original(frame_idx)
@@ -224,19 +261,20 @@ class App(ctk.CTk):
         # The timeline shares the list by reference and already popped it.
         self._rerender()
 
-    def _export_worker(self, out_path: Path) -> None:
+    def _export_worker(self, out_path: Path, input_path: Path, keyframes,
+                       direction_deg: float, osd_mask) -> None:
         try:
-            config = PipelineConfig(
-                keyframes=self._state.keyframes, direction_deg=self._state.direction_deg
-            )
+            config = PipelineConfig(keyframes=keyframes, direction_deg=direction_deg)
 
             def progress_cb(cur: int, total: int) -> None:
                 self.after(0, lambda c=cur, t=total: self._status.configure(text=f"Export: {c}/{t}"))
 
-            pipeline.run(self._state.input_path, out_path, config, self._osd_mask, progress_cb)
+            pipeline.run(input_path, out_path, config, osd_mask, progress_cb)
             self.after(0, lambda: self._status.configure(text=f"Export done: {out_path}"))
         except Exception as exc:  # noqa: BLE001
             self.after(0, lambda e=exc: self._status.configure(text=f"Export failed: {e}"))
+        finally:
+            self.after(0, lambda: setattr(self, "_export_in_progress", False))
 
 
 def main(argv: list[str] | None = None) -> int:
