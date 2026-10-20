@@ -11,7 +11,7 @@ from dvrrestorer.core.zone_detector import Zone
 
 TRACKS = ("dark", "lines", "chroma")
 ZONE_COLORS = {
-    "dark_scene": "#FFA500",
+    "low_lum": "#FFA500",
     "chroma_noise": "#20B2AA",
     "row_streak": "#8A2BE2",
     "mixed": "#808080",

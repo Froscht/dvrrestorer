@@ -38,3 +38,37 @@ def test_timeline_delete_selected_keyframe_clears_selection():
     tl.delete_selected()
     assert tl.selected_keyframe_index() is None
     root.destroy()
+
+
+def test_zone_colors_cover_all_zone_detector_dominants():
+    """Any dominant that zone_detector can produce must have a non-fallback
+    color in timeline.ZONE_COLORS. Catches key-string drift between the two
+    modules."""
+    from dvrrestorer.gui.timeline import ZONE_COLORS
+    from dvrrestorer.core.scan import FrameMetrics
+    from dvrrestorer.core.zone_detector import detect_zones
+
+    def row(i, lum, chroma, streak):
+        return FrameMetrics(
+            frame=i, t_sec=i * 0.1, mean_lum=lum, chroma_noise=chroma,
+            row_streak=streak, sharpness=100.0, black_ratio=0.0,
+            white_ratio=0.0, freeze_mad=None,
+        )
+
+    rows = []
+    for i in range(10):          # dark region
+        rows.append(row(i, 5.0 + i * 0.1, 0.1, 0.1))  # graded: detector uses strict <, percentile
+    for i in range(10, 20):      # chroma noise region
+        rows.append(row(i, 120.0, 15.0, 0.1))
+    for i in range(20, 30):      # row streak region
+        rows.append(row(i, 120.0, 0.1, 5.0))
+
+    zones = detect_zones(rows, min_zone_len_s=0.3)
+    assert zones, "expected zones to be detected"
+    seen = {z.dominant for z in zones}
+    assert "low_lum" in seen, f"dark region should yield low_lum, got {seen}"
+    missing = seen - set(ZONE_COLORS.keys())
+    assert not missing, (
+        f"zone_detector emits dominants {missing} that ZONE_COLORS has no "
+        f"non-fallback entry for; ZONE_COLORS keys: {set(ZONE_COLORS.keys())}"
+    )
