@@ -36,7 +36,7 @@ gets exactly the strength it needs.
 ## Install
 
 ```bash
-git clone https://github.com/<your-user>/dvrrestorer.git
+git clone https://github.com/Froscht/dvrrestorer.git
 cd dvrrestorer
 python -m pip install -e .
 ```

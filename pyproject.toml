@@ -26,6 +26,11 @@ cuda = ["onnxruntime-gpu"]
 dml = ["onnxruntime-directml"]
 coreml = ["onnxruntime-coreml"]
 
+[project.urls]
+Homepage = "https://github.com/Froscht/dvrrestorer"
+Repository = "https://github.com/Froscht/dvrrestorer.git"
+Issues = "https://github.com/Froscht/dvrrestorer/issues"
+
 [project.scripts]
 dvrrestorer-cli = "dvrrestorer.cli:main"
 dvrrestorer-gui = "dvrrestorer.gui.app:main"
